@@ -1,4 +1,3 @@
-# project-2
 # 🚀 Kubernetes DevOps Project
 
 > A production-grade Kubernetes setup with CI/CD via **ArgoCD**, and observability via **Prometheus** + **Grafana**.
@@ -7,6 +6,7 @@
 ![ArgoCD](https://img.shields.io/badge/ArgoCD-GitOps-EF7B4D?style=for-the-badge&logo=argo&logoColor=white)
 ![Prometheus](https://img.shields.io/badge/Prometheus-Monitoring-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46800?style=for-the-badge&logo=grafana&logoColor=white)
+![Jenkins](https://img.shields.io/badge/Jenkins-CI%2FCD-D24939?style=for-the-badge&logo=jenkins&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Container-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 
 ---
@@ -34,7 +34,8 @@
 This project demonstrates a **production-ready Kubernetes deployment** that follows modern DevOps best practices:
 
 - **Containerized microservices** deployed on Kubernetes
-- **GitOps-based continuous delivery** with ArgoCD (any Git push auto-syncs to the cluster)
+- **Jenkins CI pipeline** for automated build, test, and Docker image push on every commit
+- **GitOps-based continuous delivery** with ArgoCD (auto-syncs updated manifests to the cluster)
 - **Full observability stack** using Prometheus (metrics collection) and Grafana (visualization)
 - **Declarative infrastructure** — everything is version-controlled as YAML manifests
 
@@ -47,13 +48,13 @@ This project demonstrates a **production-ready Kubernetes deployment** that foll
                          │             GitHub Repository            │
                          │  (Source Code + K8s Manifests)          │
                          └────────────────┬────────────────────────┘
-                                          │  Git Push / PR Merge
+                                          │  Git Push / Webhook Trigger
                                           ▼
                          ┌─────────────────────────────────────────┐
-                         │           CI Pipeline (GitHub Actions)   │
+                         │           Jenkins CI Pipeline            │
                          │   Build → Test → Push Image to DockerHub │
                          └────────────────┬────────────────────────┘
-                                          │  Update image tag in manifests
+                                          │  Update image tag in manifests + Git push
                                           ▼
 ┌───────────────────────────────────────────────────────────────────────┐
 │                         Kubernetes Cluster                            │
@@ -86,7 +87,7 @@ This project demonstrates a **production-ready Kubernetes deployment** that foll
 | **ArgoCD** | GitOps-based continuous delivery |
 | **Prometheus** | Metrics collection & alerting |
 | **Grafana** | Metrics visualization & dashboards |
-| **GitHub Actions** | CI pipeline (build, test, push) |
+| **Jenkins** | CI pipeline (build, test, push image) |
 | **Helm** | Kubernetes package manager |
 
 ---
@@ -99,6 +100,7 @@ Make sure you have these installed before proceeding:
 - [Helm](https://helm.sh/docs/intro/install/) >= 3.x
 - [Docker](https://docs.docker.com/get-docker/)
 - A running Kubernetes cluster (Minikube / Kind / EKS / GKE / AKS)
+- [Jenkins](https://www.jenkins.io/doc/book/installing/) >= 2.400 (with Docker + Git plugins)
 - [ArgoCD CLI](https://argo-cd.readthedocs.io/en/stable/cli_installation/) (optional but recommended)
 
 ---
@@ -107,9 +109,7 @@ Make sure you have these installed before proceeding:
 
 ```
 k8s-project/
-├── .github/
-│   └── workflows/
-│       └── ci.yml                  # GitHub Actions CI pipeline
+├── Jenkinsfile                     # Jenkins declarative pipeline
 ├── app/
 │   ├── Dockerfile                  # Application Docker image
 │   └── src/                        # Application source code
@@ -452,48 +452,132 @@ spec:
 
 ## ⚙️ CI/CD Pipeline
 
-### GitHub Actions CI (`.github/workflows/ci.yml`)
+This project uses **Jenkins** as the CI engine and **ArgoCD** as the CD engine (GitOps model).
 
-```yaml
-name: CI Pipeline
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and Push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app
-          push: true
-          tags: devops0014/k8s-project:${{ github.sha }}
-
-      - name: Update image tag in manifests
-        run: |
-          sed -i "s|devops0014/k8s-project:.*|devops0014/k8s-project:${{ github.sha }}|" k8s/deployment.yaml
-          git config --global user.email "ci@github.com"
-          git config --global user.name "GitHub Actions"
-          git add k8s/deployment.yaml
-          git commit -m "ci: update image to ${{ github.sha }}"
-          git push
+```
+Developer pushes code
+       │
+       ▼
+Jenkins detects webhook → runs Jenkinsfile pipeline
+       │
+       ├── Stage 1: Checkout
+       ├── Stage 2: Build Docker image
+       ├── Stage 3: Push image to DockerHub
+       └── Stage 4: Update image tag in k8s/deployment.yaml → Git push
+                         │
+                         ▼
+              ArgoCD detects Git change → auto-deploys to cluster ✅
 ```
 
-> ArgoCD detects this commit and auto-deploys the new image to the cluster. 🎯
+### Jenkins Prerequisites
+
+Install these Jenkins plugins:
+- **Git Plugin** — to clone the repo
+- **Docker Pipeline Plugin** — to build & push Docker images
+- **Pipeline Plugin** — for declarative pipelines
+- **Credentials Binding Plugin** — for secrets management
+
+### Add Credentials in Jenkins
+
+Go to **Jenkins → Manage Jenkins → Credentials → Global → Add Credentials**:
+
+| ID | Type | Description |
+|----|------|-------------|
+| `dockerhub-credentials` | Username/Password | DockerHub login |
+| `github-credentials` | Username/Password or SSH | GitHub access for git push |
+
+### Jenkinsfile
+
+Place this `Jenkinsfile` at the root of your repository:
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME     = "devops0014/k8s-project"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+        REGISTRY_CREDS = credentials('dockerhub-credentials')
+        GIT_REPO       = "https://github.com/devops0014/k8s-project.git"
+        GIT_BRANCH     = "main"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: "${GIT_BRANCH}",
+                    credentialsId: 'github-credentials',
+                    url: "${GIT_REPO}"
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    dockerImage = docker.build("${IMAGE_NAME}:${IMAGE_TAG}", "./app")
+                }
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', 'dockerhub-credentials') {
+                        dockerImage.push("${IMAGE_TAG}")
+                        dockerImage.push("latest")
+                    }
+                }
+            }
+        }
+
+        stage('Update K8s Manifest') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-credentials',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_PASS'
+                )]) {
+                    sh """
+                        git config user.email "jenkins@ci.local"
+                        git config user.name "Jenkins"
+
+                        # Update image tag in deployment manifest
+                        sed -i 's|${IMAGE_NAME}:.*|${IMAGE_NAME}:${IMAGE_TAG}|' k8s/deployment.yaml
+
+                        git add k8s/deployment.yaml
+                        git commit -m "ci: update image tag to ${IMAGE_TAG} [skip ci]"
+                        git push https://${GIT_USER}:${GIT_PASS}@github.com/devops0014/k8s-project.git ${GIT_BRANCH}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Build ${IMAGE_TAG} pushed. ArgoCD will deploy automatically."
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs above."
+        }
+        always {
+            // Clean up local Docker image to save disk space
+            sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+        }
+    }
+}
+```
+
+### Configure Webhook (GitHub → Jenkins)
+
+1. In Jenkins, go to your pipeline job → **Configure** → enable **GitHub hook trigger for GITScm polling**
+2. In GitHub repo → **Settings → Webhooks → Add webhook**
+   - Payload URL: `http://<JENKINS_IP>:8080/github-webhook/`
+   - Content type: `application/json`
+   - Trigger: **Just the push event**
+
+> ArgoCD detects the manifest update commit and auto-deploys the new image to the cluster. 🎯
 
 ---
 
@@ -514,6 +598,13 @@ jobs:
 ```bash
 kubectl describe pod <pod-name>
 kubectl logs <pod-name> --previous
+```
+
+**Jenkins pipeline failing on Docker push?**
+```bash
+# Ensure Jenkins user is in the docker group on the Jenkins host
+sudo usermod -aG docker jenkins
+sudo systemctl restart jenkins
 ```
 
 **ArgoCD out of sync?**
@@ -543,13 +634,3 @@ kubectl get servicemonitor -n monitoring
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-  <b>Built with ❤️ by <a href="https://github.com/devops0014">devops0014</a></b><br/>
-  <i>If this helped you, please ⭐ the repo!</i>
-</div>
